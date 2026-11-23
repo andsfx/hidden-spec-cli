@@ -6,7 +6,7 @@
 // In a trial the grader runs `node /bot/main.ts` with MAKEFUN_ENV_URL set, and then this file hands over to runner.ts
 // (the last lines below): keep that hand-over and runner.ts as they are.
 
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const FORMATS = ['auto', 'unified', 'search-replace', 'v4a', 'json'];
@@ -162,6 +162,20 @@ class Tree {
   }
   get(p: string): string | null {
     return this.now.has(p) ? this.now.get(p)! : this.original(p);
+  }
+  /** C22: true when the target path is occupied by a file, a directory or a virtual directory from an earlier edit. */
+  exists(p: string): boolean {
+    if (this.get(p) !== null) return true;
+    try {
+      if (!lstatSync(p).isFile()) return true;
+    } catch {
+      // No entry on disk: fall through to the virtual tree.
+    }
+    const prefix = `${p}/`;
+    for (const [k, v] of this.now) {
+      if (v !== null && k.startsWith(prefix)) return true;
+    }
+    return false;
   }
 }
 
@@ -347,7 +361,7 @@ function unifiedEdits(lines: string[]): Edit[] {
       const text = createdText(s);
       edits.push((tree) => {
         safePath(path);
-        if (tree.get(path) !== null) throw new Fail('exists', path);
+        if (tree.exists(path)) throw new Fail('exists', path);
         tree.now.set(path, text);
       });
       continue;
@@ -372,7 +386,7 @@ function unifiedEdits(lines: string[]): Edit[] {
       safePath(to);
       const before = tree.get(from);
       if (before === null) throw new Fail('missing', from);
-      if (move && tree.get(to) !== null) throw new Fail('exists', to);
+      if (move && tree.exists(to)) throw new Fail('exists', to);
       const doc = splitDoc(before);
       let hay = doc.lines;
       let final = doc.final;
@@ -474,7 +488,7 @@ function searchReplaceEdits(lines: string[]): Edit[] {
       safePath(p);
       const before = tree.get(p);
       if (oldLines.length === 0) {
-        if (before !== null) throw new Fail('exists', p);
+        if (tree.exists(p)) throw new Fail('exists', p);
         tree.now.set(p, newFile(newLines));
         return;
       }
@@ -554,7 +568,7 @@ function v4aEdits(lines: string[]): Edit[] {
       const text = newFile(content);
       edits.push((tree) => {
         safePath(path);
-        if (tree.get(path) !== null) throw new Fail('exists', path);
+        if (tree.exists(path)) throw new Fail('exists', path);
         tree.now.set(path, text);
       });
       continue;
@@ -627,7 +641,7 @@ function v4aEdits(lines: string[]): Edit[] {
       if (before === null) throw new Fail('missing', path);
       if (to !== null) {
         safePath(to);
-        if (tree.get(to) !== null) throw new Fail('exists', to);
+        if (tree.exists(to)) throw new Fail('exists', to);
       }
       const doc = splitDoc(before);
       let hay = doc.lines;
@@ -700,7 +714,7 @@ function jsonEdit(v: unknown): Edit | null {
     const text = o.file_text;
     return (tree) => {
       safePath(p);
-      if (tree.get(p) !== null) throw new Fail('exists', p);
+      if (tree.exists(p)) throw new Fail('exists', p);
       tree.now.set(p, text);
     };
   }
@@ -874,15 +888,16 @@ function run(args: string[]): { code: number; out: string[] } {
   rows.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
   const out = [...rows.map((r) => r.line), `ok: ${rows.length} ${rows.length === 1 ? 'file' : 'files'}`];
   if (check) return { code: 0, out };
+  // Every removal runs before every write, so deleting `foo` then creating `foo/a.txt` is clean.
+  for (const p of paths) {
+    if (tree.get(p) === null && tree.original(p) !== null) rmSync(p, { force: true });
+  }
   for (const p of paths) {
     const was = tree.original(p);
     const now = tree.get(p);
-    if (was === now) continue;
-    if (now === null) rmSync(p, { force: true });
-    else {
-      mkdirSync(dirname(p), { recursive: true });
-      writeFileSync(p, now);
-    }
+    if (now === null || was === now) continue;
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, now);
   }
   return { code: 0, out };
 }
